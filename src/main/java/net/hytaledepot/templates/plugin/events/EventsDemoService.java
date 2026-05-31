@@ -1,6 +1,8 @@
 package net.hytaledepot.templates.plugin.events;
 
 import java.nio.file.Path;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -8,23 +10,18 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class EventsDemoService {
   private final Map<String, AtomicLong> actionCounters = new ConcurrentHashMap<>();
   private final Map<String, String> lastActionBySender = new ConcurrentHashMap<>();
-  private final Map<String, String> runtimeValues = new ConcurrentHashMap<>();
-  private final Map<String, String> domainState = new ConcurrentHashMap<>();
-  private final Map<String, AtomicLong> numericState = new ConcurrentHashMap<>();
-
+  private final Deque<String> recentEvents = new ArrayDeque<>();
   private volatile Path dataDirectory;
 
   public void initialize(Path dataDirectory) {
     this.dataDirectory = dataDirectory;
-    runtimeValues.put("category", "Events");
-    runtimeValues.put("defaultAction", "event-probe");
-    runtimeValues.put("initialized", "true");
+    recentEvents.clear();
   }
 
   public void onHeartbeat(long tick) {
     actionCounters.computeIfAbsent("heartbeat", key -> new AtomicLong()).incrementAndGet();
     if (tick % 120 == 0) {
-      runtimeValues.put("lastHeartbeat", String.valueOf(tick));
+      appendEvent("heartbeat:" + tick);
     }
   }
 
@@ -41,7 +38,6 @@ public final class EventsDemoService {
 
     if ("toggle".equals(normalizedAction)) {
       boolean enabled = state.toggleDemoFlag();
-      runtimeValues.put("demoFlag", String.valueOf(enabled));
       return "[Events] demoFlag=" + enabled + ", heartbeatTicks=" + heartbeatTicks;
     }
 
@@ -71,52 +67,38 @@ public final class EventsDemoService {
 
   public String diagnostics() {
     String directory = dataDirectory == null ? "unset" : dataDirectory.toString();
-    return "ops="
-        + operationCount()
-        + ", trackedActions="
-        + actionCounters.size()
-        + ", domainEntries="
-        + domainState.size()
-        + ", numericEntries="
-        + numericState.size()
-        + ", dataDirectory="
-        + directory;
+    String latest = recentEvents.peekLast() == null ? "none" : recentEvents.peekLast();
+    return "ops=" + operationCount()
+        + ", recentEvents=" + recentEvents.size()
+        + ", latest=" + latest
+        + ", dataDirectory=" + directory;
   }
 
   public void shutdown() {
-    runtimeValues.put("initialized", "false");
+    recentEvents.clear();
   }
 
   private String handleDomainAction(String sender, String action, long heartbeatTicks) {
     if ("sample".equals(action) || "event-probe".equals(action)) {
-      long count = incrementNumber("event:probe", 1);
-      domainState.put("event:last", "probe");
-      return "probeCount=" + count;
+      appendEvent("probe:" + sender + ":" + heartbeatTicks);
+      return "probe registered, queue=" + recentEvents.size();
     }
     if ("emit-demo".equals(action)) {
-      long count = incrementNumber("event:custom", 1);
-      domainState.put("event:last", "custom");
-      return "customEventCount=" + count;
+      appendEvent("custom:" + sender + ":quest_state_updated");
+      return "custom event emitted";
     }
     if ("clear-events".equals(action)) {
-      setNumber("event:probe", 0);
-      setNumber("event:custom", 0);
-      domainState.put("event:last", "cleared");
-      return "event counters cleared";
+      recentEvents.clear();
+      return "event queue cleared";
     }
     return null;
   }
 
-  private long incrementNumber(String key, long delta) {
-    return numericState.computeIfAbsent(key, item -> new AtomicLong()).addAndGet(delta);
-  }
-
-  private long number(String key) {
-    return numericState.computeIfAbsent(key, item -> new AtomicLong()).get();
-  }
-
-  private void setNumber(String key, long value) {
-    numericState.computeIfAbsent(key, item -> new AtomicLong()).set(value);
+  private void appendEvent(String value) {
+    recentEvents.addLast(value);
+    while (recentEvents.size() > 32) {
+      recentEvents.removeFirst();
+    }
   }
 
   private static String normalizeAction(String action) {
